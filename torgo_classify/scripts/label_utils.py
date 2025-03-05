@@ -1,10 +1,10 @@
 def get_severity_label(speaker):
-    """根据说话人 ID 分配严重程度标签"""
-    if speaker in ['F03', 'F04', 'M03']:
-        return 'VERY LOW'
-    elif speaker in ['F01', 'M05']:
-        return 'LOW'
-    elif speaker in ['M01', 'M02', 'M04']:
-        return 'MEDIUM'
+    """根据说话者ID获取严重程度标签（数值类型）"""
+    if speaker in ['F01', 'M01', 'M02']:
+        return 0  # 轻度
+    elif speaker in ['F03', 'M03', 'M04']:
+        return 1  # 中度
+    elif speaker in ['F04', 'M05']:
+        return 2  # 重度
     else:
-        return 'UNKNOWN'
+        return -1  # 未知
