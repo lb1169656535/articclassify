@@ -12,6 +12,15 @@ from experiment_config import DATASET_ROOT, TARGET_SR, FEATURE_CACHE_DIR
 from log_utils import setup_logger
 from models import DNN, CNN, LSTM
 
+from sklearn.ensemble import RandomForestClassifier
+import xgboost as xgb
+from models import ResNet, GRU 
+
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))  # 添加当前目录到PATH
+from utils.visualization import plot_model_comparison
+
+
 # 初始化日志记录器
 logger = setup_logger()
 
@@ -96,6 +105,7 @@ def train_and_evaluate_pytorch(model, X_train, X_test, y_train, y_test, model_na
     criterion = torch.nn.CrossEntropyLoss()
     
     for epoch in range(600):  # 训练 10 轮
+        print(f"training {model_name} for {epoch} epochs ……\n")
         model.train()
         optimizer.zero_grad()
         outputs = model(X_train)
@@ -144,6 +154,42 @@ def main():
         f.write(f"Model,Accuracy\n")
         f.write(f"SVM,{accuracy}\n")
     
+    # 训练和评估随机森林
+    logger.info("Training Random Forest classifier...")
+    try:
+        rf = RandomForestClassifier(n_estimators=100, random_state=42)
+        rf.fit(X_train_1d, y_train)
+        y_pred = rf.predict(X_test_1d)
+        accuracy = accuracy_score(y_test, y_pred)
+        report = classification_report(y_test, y_pred)
+        logger.info(f"RandomForest Accuracy: {accuracy}")
+        with open('../results/classification_results.csv', 'a') as f:
+            f.write(f"RandomForest,{accuracy}\n")
+    except Exception as e:
+        logger.error(f"Error in RandomForest training: {e}")
+    
+    # 训练和评估 XGBoost
+    logger.info("Training XGBoost classifier...")
+    try:
+        xgb_model = xgb.XGBClassifier(
+            objective='multi:softmax',
+            num_class=4,
+            n_estimators=100,
+            learning_rate=0.1
+        )
+        xgb_model.fit(X_train_1d, y_train)
+        y_pred = xgb_model.predict(X_test_1d)
+        accuracy = accuracy_score(y_test, y_pred)
+        report = classification_report(y_test, y_pred)
+        logger.info(f"XGBoost Accuracy: {accuracy}")
+        with open('../results/classification_results.csv', 'a') as f:
+            f.write(f"XGBoost,{accuracy}\n")
+    except Exception as e:
+        logger.error(f"Error in XGBoost training: {e}")
+
+   
+
+
     # 使用 GPU 加速
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
@@ -179,6 +225,46 @@ def main():
             f.write(f"LSTM,{lstm_accuracy}\n")
     except Exception as e:
         logger.error(f"Error in LSTM training: {e}")
+
+         # 训练和评估 ResNet
+    try:
+        resnet = ResNet()
+        X_train_resnet = np.expand_dims(X_train_2d, axis=1)  # 添加通道维度
+        X_test_resnet = np.expand_dims(X_test_2d, axis=1)
+        resnet_accuracy, resnet_report = train_and_evaluate_pytorch(
+            resnet, X_train_resnet, X_test_resnet, 
+            y_train, y_test, 'ResNet', device
+        )
+        with open('../results/classification_results.csv', 'a') as f:
+            f.write(f"ResNet,{resnet_accuracy}\n")
+    except Exception as e:
+        logger.error(f"Error in ResNet training: {e}")
+    
+    # 训练和评估 GRU
+    try:
+        gru = GRU()
+        X_train_gru = np.array([mfcc.T for mfcc in X_train_2d])
+        X_test_gru = np.array([mfcc.T for mfcc in X_test_2d])
+        gru_accuracy, gru_report = train_and_evaluate_pytorch(
+            gru, X_train_gru, X_test_gru, 
+            y_train, y_test, 'GRU', device
+        )
+        with open('../results/classification_results.csv', 'a') as f:
+            f.write(f"GRU,{gru_accuracy}\n")
+    except Exception as e:
+        logger.error(f"Error in GRU training: {e}")
+
+         # 在所有模型训练完成后,对比模型结果：
+    logger.info("Generating model comparison report...")
+    try:
+        results_csv = os.path.abspath('../results/classification_results.csv')
+        plot_model_comparison(
+            csv_path=results_csv,
+            output_path='../results/model_comparison.png'
+        )
+        logger.info(f"Comparison chart saved to ../results/model_comparison.png")
+    except Exception as e:
+        logger.error(f"Failed to generate comparison chart: {e}")
 
 if __name__ == "__main__":
     main()

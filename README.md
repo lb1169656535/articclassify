@@ -3,3 +3,5 @@
 
 相关依赖
 pip install -r requirements.txt
+## 当前实验结果
+![alt text](torgo_classify/results/model_comparison.png)
