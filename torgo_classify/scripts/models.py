@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F  
 class DNN(nn.Module):
     """DNN 模型"""
-    def __init__(self, input_dim, hidden_units=[16, 32], num_classes=4):
+    def __init__(self, input_dim, hidden_units=[16, 32], num_classes=3):
         super(DNN, self).__init__()
         layers = []
         for units in hidden_units:
@@ -18,7 +18,7 @@ class DNN(nn.Module):
 # models.py
 class CNN(nn.Module):
     """CNN 模型"""
-    def __init__(self, num_classes=4):
+    def __init__(self, num_classes=3):
         super(CNN, self).__init__()
         self.conv_layers = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=(2, 2), stride=(1, 1)),
@@ -61,7 +61,7 @@ class CNN(nn.Module):
 
 class LSTM(nn.Module):
     """LSTM 模型"""
-    def __init__(self, input_size=13, hidden_size=102, num_layers=3, num_classes=4):
+    def __init__(self, input_size=13, hidden_size=102, num_layers=3, num_classes=3):
         super(LSTM, self).__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
         self.dropout = nn.Dropout(0.2)
@@ -76,7 +76,7 @@ class LSTM(nn.Module):
 # 新增模型类
 class ResNet(nn.Module):
     """ResNet 模型"""
-    def __init__(self, num_classes=4):
+    def __init__(self, num_classes=3):
         super(ResNet, self).__init__()
         
         # 初始卷积层
@@ -141,7 +141,7 @@ class ResidualBlock(nn.Module):
 
 class GRU(nn.Module):
     """GRU 模型"""
-    def __init__(self, input_size=13, hidden_size=102, num_layers=3, num_classes=4):
+    def __init__(self, input_size=13, hidden_size=102, num_layers=3, num_classes=3):
         super(GRU, self).__init__()
         self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
         self.dropout = nn.Dropout(0.2)

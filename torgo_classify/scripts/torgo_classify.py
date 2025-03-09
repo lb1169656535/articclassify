@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.metrics import classification_report, accuracy_score,confusion_matrix
 from audio_processing import resample_audio, extract_mfcc, extract_2d_mfcc
 from label_utils import get_severity_label
 from experiment_config import DATASET_ROOT, TARGET_SR, FEATURE_CACHE_DIR
@@ -16,9 +16,10 @@ from sklearn.ensemble import RandomForestClassifier
 import xgboost as xgb
 from models import ResNet, GRU 
 
+import pandas as pd
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))  # 添加当前目录到PATH
-from utils.visualization import plot_model_comparison
+from utils.visualization import plot_model_comparison,plot_confusion_matrices,plot_metrics
 
 
 # 初始化日志记录器
@@ -84,7 +85,7 @@ def load_and_process_data(use_2d_mfcc=False):
     return np.array(features), np.array(labels)
 
 def train_and_evaluate_pytorch(model, X_train, X_test, y_train, y_test, model_name, device):
-    """训练和评估 PyTorch 模型"""
+    """训练和评估 PyTorch 模型（返回准确率、分类报告、混淆矩阵）"""
     # 将模型移动到设备
     model = model.to(device)
     
@@ -100,171 +101,243 @@ def train_and_evaluate_pytorch(model, X_train, X_test, y_train, y_test, model_na
     y_train = torch.tensor(y_train, dtype=torch.long).to(device)
     y_test = torch.tensor(y_test, dtype=torch.long).to(device)
     
-    # 训练和评估模型
+    # 训练配置
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     criterion = torch.nn.CrossEntropyLoss()
     
-    for epoch in range(600):  # 训练 10 轮
-        print(f"training {model_name} for {epoch} epochs ……\n")
-        model.train()
+    # 训练循环
+    model.train()
+    for epoch in range(600):
+        if (epoch+1) % 100 == 0:  # 每100轮输出进度
+            print(f"Training {model_name} | Epoch {epoch+1}/600")
+            
         optimizer.zero_grad()
         outputs = model(X_train)
         loss = criterion(outputs, y_train)
         loss.backward()
         optimizer.step()
     
-    # 评估模型
+    # 评估模式
     model.eval()
     with torch.no_grad():
-        y_pred = model(X_test).argmax(dim=1)
+        # 获取预测结果
+        test_outputs = model(X_test)
+        y_pred = test_outputs.argmax(dim=1)
+        
+        # 计算准确率
         accuracy = (y_pred == y_test).float().mean().item()
-        report = classification_report(y_test.cpu(), y_pred.cpu())
+        
+        # 转换为numpy数组
+        y_test_np = y_test.cpu().numpy()
+        y_pred_np = y_pred.cpu().numpy()
+        
+        # 生成分类报告和混淆矩阵
+        report_dict = classification_report(
+            y_test_np, y_pred_np,
+            target_names=['Very Low', 'Low', 'Medium'],
+            output_dict=True
+        )
+        confusion = confusion_matrix(y_test_np, y_pred_np)
     
-    return accuracy, report
+    return accuracy, report_dict, confusion
 
+# 在torgo_classify.py中添加以下辅助函数
+def save_detailed_metrics(report_dict, model_name, output_path):
+    """保存详细指标到CSV"""
+    classes = ['Very Low', 'Low', 'Medium']
+    rows = []
+    for class_name in classes:
+        metrics = report_dict[class_name]
+        rows.append({
+            'Model': model_name,
+            'Class': class_name,
+            'Precision': metrics['precision'],
+            'Recall': metrics['recall'],
+            'F1': metrics['f1-score'],
+            'Support': metrics['support']
+        })
+    df = pd.DataFrame(rows)
+    header = not os.path.exists(output_path)
+    df.to_csv(output_path, mode='a', header=header, index=False)
+
+def save_confusion_matrix(confusion, model_name, output_dir):
+    """保存混淆矩阵到CSV"""
+    classes = ['Very Low', 'Low', 'Medium']
+    df = pd.DataFrame(confusion, 
+                     index=pd.Index(classes, name='True'),
+                     columns=pd.Index(classes, name='Predicted'))
+    df.to_csv(os.path.join(output_dir, f'confusion_matrix_{model_name}.csv'))
 
 def main():
+    # 初始化结果文件
+    results_dir = '../results'
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # 清空或创建结果文件
+    with open(os.path.join(results_dir, 'classification_results.csv'), 'w') as f:
+        f.write("Model,Accuracy\n")
+    with open(os.path.join(results_dir, 'detailed_metrics.csv'), 'w') as f:
+        f.write("Model,Class,Precision,Recall,F1,Support\n")
+    
     # 加载和处理数据
     logger.info("Loading and processing data...")
     
-    # 加载 1D MFCC 特征（用于 DNN 和 SVM）
+    # 加载 1D MFCC 特征
     features_1d, labels = load_and_process_data(use_2d_mfcc=False)
-    X_train_1d, X_test_1d, y_train, y_test = train_test_split(features_1d, labels, test_size=0.2, random_state=42)
+    X_train_1d, X_test_1d, y_train, y_test = train_test_split(
+        features_1d, labels, test_size=0.2, random_state=42
+    )
     
-    # 加载 2D MFCC 特征（用于 CNN 和 LSTM）
+    # 加载 2D MFCC 特征
     features_2d, _ = load_and_process_data(use_2d_mfcc=True)
     if len(features_2d) == 0:
         logger.error("No valid 2D MFCC features found!")
         return
-    X_train_2d, X_test_2d, _, _ = train_test_split(features_2d, labels, test_size=0.2, random_state=42)
+    X_train_2d, X_test_2d, _, _ = train_test_split(
+        features_2d, labels, test_size=0.2, random_state=42
+    )
     
-    # 训练和评估 SVM
-    logger.info("Training SVM classifier...")
-    svm = SVC(kernel='linear')
-    svm.fit(X_train_1d, y_train)
-    y_pred = svm.predict(X_test_1d)
-    accuracy = accuracy_score(y_test, y_pred)
-    report = classification_report(y_test, y_pred)
-    logger.info(f"SVM Accuracy: {accuracy}")
-    logger.info("SVM Classification Report:\n" + report)
-    
-    # 保存 SVM 结果
-    os.makedirs('../results', exist_ok=True)
-    with open('../results/classification_results.csv', 'w') as f:
-        f.write(f"Model,Accuracy\n")
-        f.write(f"SVM,{accuracy}\n")
-    
-    # 训练和评估随机森林
-    logger.info("Training Random Forest classifier...")
-    try:
-        rf = RandomForestClassifier(n_estimators=100, random_state=42)
-        rf.fit(X_train_1d, y_train)
-        y_pred = rf.predict(X_test_1d)
-        accuracy = accuracy_score(y_test, y_pred)
-        report = classification_report(y_test, y_pred)
-        logger.info(f"RandomForest Accuracy: {accuracy}")
-        with open('../results/classification_results.csv', 'a') as f:
-            f.write(f"RandomForest,{accuracy}\n")
-    except Exception as e:
-        logger.error(f"Error in RandomForest training: {e}")
-    
-    # 训练和评估 XGBoost
-    logger.info("Training XGBoost classifier...")
-    try:
-        xgb_model = xgb.XGBClassifier(
-            objective='multi:softmax',
-            num_class=4,
-            n_estimators=100,
-            learning_rate=0.1
-        )
-        xgb_model.fit(X_train_1d, y_train)
-        y_pred = xgb_model.predict(X_test_1d)
-        accuracy = accuracy_score(y_test, y_pred)
-        report = classification_report(y_test, y_pred)
-        logger.info(f"XGBoost Accuracy: {accuracy}")
-        with open('../results/classification_results.csv', 'a') as f:
-            f.write(f"XGBoost,{accuracy}\n")
-    except Exception as e:
-        logger.error(f"Error in XGBoost training: {e}")
-
-   
-
-
-    # 使用 GPU 加速
+    # 定义设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
-    
-    # 训练和评估 DNN
-    try:
-        dnn = DNN(input_dim=X_train_1d.shape[1])
-        dnn_accuracy, dnn_report = train_and_evaluate_pytorch(dnn, X_train_1d, X_test_1d, y_train, y_test, 'DNN', device)
-        with open('../results/classification_results.csv', 'a') as f:
-            f.write(f"DNN,{dnn_accuracy}\n")
-    except Exception as e:
-        logger.error(f"Error in DNN training: {e}")
-    
-    # 训练和评估 CNN
-    try:
-        cnn = CNN()
-        X_train_cnn = np.expand_dims(X_train_2d, axis=1)  # 添加通道维度
-        X_test_cnn = np.expand_dims(X_test_2d, axis=1)
-        cnn_accuracy, cnn_report = train_and_evaluate_pytorch(cnn, X_train_cnn, X_test_cnn, y_train, y_test, 'CNN', device)
-        with open('../results/classification_results.csv', 'a') as f:
-            f.write(f"CNN,{cnn_accuracy}\n")
-    except Exception as e:
-        logger.error(f"Error in CNN training: {e}")
-    
- # 训练和评估 LSTM
-    try:
-        lstm = LSTM()
-        # 转置特征形状为 (180, 13)
-        X_train_lstm = np.array([mfcc.T for mfcc in X_train_2d])  # 形状 (样本数, 180, 13)
-        X_test_lstm = np.array([mfcc.T for mfcc in X_test_2d])    # 形状 (样本数, 180, 13)
-        lstm_accuracy, lstm_report = train_and_evaluate_pytorch(lstm, X_train_lstm, X_test_lstm, y_train, y_test, 'LSTM', device)
-        with open('../results/classification_results.csv', 'a') as f:
-            f.write(f"LSTM,{lstm_accuracy}\n")
-    except Exception as e:
-        logger.error(f"Error in LSTM training: {e}")
 
-         # 训练和评估 ResNet
-    try:
-        resnet = ResNet()
-        X_train_resnet = np.expand_dims(X_train_2d, axis=1)  # 添加通道维度
-        X_test_resnet = np.expand_dims(X_test_2d, axis=1)
-        resnet_accuracy, resnet_report = train_and_evaluate_pytorch(
-            resnet, X_train_resnet, X_test_resnet, 
-            y_train, y_test, 'ResNet', device
-        )
-        with open('../results/classification_results.csv', 'a') as f:
-            f.write(f"ResNet,{resnet_accuracy}\n")
-    except Exception as e:
-        logger.error(f"Error in ResNet training: {e}")
-    
-    # 训练和评估 GRU
-    try:
-        gru = GRU()
-        X_train_gru = np.array([mfcc.T for mfcc in X_train_2d])
-        X_test_gru = np.array([mfcc.T for mfcc in X_test_2d])
-        gru_accuracy, gru_report = train_and_evaluate_pytorch(
-            gru, X_train_gru, X_test_gru, 
-            y_train, y_test, 'GRU', device
-        )
-        with open('../results/classification_results.csv', 'a') as f:
-            f.write(f"GRU,{gru_accuracy}\n")
-    except Exception as e:
-        logger.error(f"Error in GRU training: {e}")
+    # ==================== 传统机器学习模型 ====================
+    def evaluate_sklearn_model(model, model_name, X_train, X_test):
+        """通用sklearn模型评估函数"""
+        try:
+            logger.info(f"Training {model_name} classifier...")
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            
+            # 计算指标
+            accuracy = accuracy_score(y_test, y_pred)
+            report_dict = classification_report(
+                y_test, y_pred,
+                target_names=['Very Low', 'Low', 'Medium'],
+                output_dict=True
+            )
+            confusion = confusion_matrix(y_test, y_pred)
+            
+            # 保存结果
+            with open('../results/classification_results.csv', 'a') as f:
+                f.write(f"{model_name},{accuracy:.4f}\n")
+            save_detailed_metrics(report_dict, model_name, '../results/detailed_metrics.csv')
+            save_confusion_matrix(confusion, model_name, '../results')
+            
+            logger.info(f"{model_name} evaluation completed")
+            
+        except Exception as e:
+            logger.error(f"Error in {model_name} training: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
 
-         # 在所有模型训练完成后,对比模型结果：
-    logger.info("Generating model comparison report...")
+    # SVM
+    evaluate_sklearn_model(SVC(kernel='linear'), "SVM", X_train_1d, X_test_1d)
+    
+    # RandomForest
+    evaluate_sklearn_model(
+        RandomForestClassifier(n_estimators=100, random_state=42),
+        "RandomForest",
+        X_train_1d,
+        X_test_1d
+    )
+    
+    # XGBoost
+    evaluate_sklearn_model(
+        xgb.XGBClassifier(
+            objective='multi:softmax',
+            num_class=3,  # 修正为3分类
+            n_estimators=100,
+            learning_rate=0.1
+        ),
+        "XGBoost",
+        X_train_1d,
+        X_test_1d
+    )
+
+    # ==================== PyTorch 深度学习模型 ====================
+    def evaluate_pytorch_model(model_class, model_name, input_type, reshape_fn=None):
+        """通用PyTorch模型评估函数"""
+        try:
+            logger.info(f"Initializing {model_name}...")
+            
+            # 根据输入类型选择数据
+            if input_type == '1d':
+                X_train = X_train_1d
+                X_test = X_test_1d
+            elif input_type == '2d':
+                X_train = X_train_2d
+                X_test = X_test_2d
+            
+            # 数据预处理
+            if reshape_fn:
+                X_train = reshape_fn(X_train)
+                X_test = reshape_fn(X_test)
+            
+            # 初始化模型
+            if model_class == DNN:
+                model = model_class(input_dim=X_train.shape[1])
+            else:
+                model = model_class()
+            
+            # 训练评估
+            accuracy, report_dict, confusion = train_and_evaluate_pytorch(
+                model, X_train, X_test, y_train, y_test, model_name, device
+            )
+            
+            # 保存结果
+            with open('../results/classification_results.csv', 'a') as f:
+                f.write(f"{model_name},{accuracy:.4f}\n")
+            save_detailed_metrics(report_dict, model_name, '../results/detailed_metrics.csv')
+            save_confusion_matrix(confusion, model_name, '../results')
+            
+            logger.info(f"{model_name} evaluation completed")
+            
+        except Exception as e:
+            logger.error(f"Error in {model_name} training: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+    # DNN
+    evaluate_pytorch_model(DNN, "DNN", '1d')
+
+    # CNN
+    evaluate_pytorch_model(
+        CNN, "CNN", '2d',
+        reshape_fn=lambda x: np.expand_dims(x, axis=1)  # 添加通道维度
+    )
+
+    # LSTM
+    evaluate_pytorch_model(
+        LSTM, "LSTM", '2d',
+        reshape_fn=lambda x: np.array([mfcc.T for mfcc in x])  # 转置为 (seq_len, features)
+    )
+
+    # ResNet
+    evaluate_pytorch_model(
+        ResNet, "ResNet", '2d',
+        reshape_fn=lambda x: np.expand_dims(x, axis=1)  # 添加通道维度
+    )
+
+    # GRU
+    evaluate_pytorch_model(
+        GRU, "GRU", '2d',
+        reshape_fn=lambda x: np.array([mfcc.T for mfcc in x])  # 转置为 (seq_len, features)
+    )
+
+    # 生成可视化结果
+    logger.info("Generating visualizations...")
     try:
-        results_csv = os.path.abspath('../results/classification_results.csv')
         plot_model_comparison(
-            csv_path=results_csv,
-            output_path='../results/model_comparison.png'
+            os.path.abspath('../results/classification_results.csv'),
+            os.path.abspath('../results/model_comparison.png')
         )
-        logger.info(f"Comparison chart saved to ../results/model_comparison.png")
+        plot_metrics(os.path.abspath('../results/detailed_metrics.csv'))
+        plot_confusion_matrices(os.path.abspath('../results'))
+        logger.info("Visualization generation completed")
     except Exception as e:
-        logger.error(f"Failed to generate comparison chart: {e}")
+        logger.error(f"Visualization generation failed: {str(e)}")
+
 
 if __name__ == "__main__":
     main()
